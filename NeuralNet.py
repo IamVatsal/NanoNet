@@ -121,9 +121,6 @@ class NeuralNet:
         prediction = self.predict(X[index].reshape(1, -1))
         print(f"Model Prediction: {prediction[0]}")
         print(f"True Label: {Y[index]}")
-        # current_image = X[index].reshape(28, 28)
-        # plt.imshow(current_image, cmap='gray')
-        # plt.show()
 
     def get_losses(self):
         return self.__losses
