@@ -116,7 +116,9 @@ True Label: 5
 Install:
 
 ```bash
-pip install numpy pandas matplotlib
+python3 -m venv venv
+source venv/bin/activate
+pip install numpy pandas
 ```
 
 ---
