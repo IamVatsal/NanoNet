@@ -2,12 +2,11 @@ import numpy as np
 
 class NeuralNet:
     def __init__(self, layers, method="he"):
-        np.random.seed(1)
         if method == "he":
             self.__W = [np.random.randn(layers[i], layers[i + 1]) * np.sqrt(2 / layers[i]) for i in range(len(layers) - 1)]
             self.__B = [np.zeros((1, layers[i + 1])) for i in range(len(layers) - 1)]
             self.__losses = []
-            self.__traing_methods = ["gradient_descent"]
+            self.__traing_methods = ["gradient_descent : gd", "stochastic_gradient_descent : sgd"]
     
     def __ReLU(self, x):
         return np.maximum(0, x)
@@ -73,7 +72,8 @@ class NeuralNet:
         m = Y.size
         # output shape: (m, 10)
         # Y: (m,) integer labels
-        log_likelihood = -np.log(output[range(m), Y] + 1e-8)
+        prob = np.clip(output, 1e-8, 1 - 1e-8)
+        log_likelihood = -np.log(prob[range(m), Y])
         loss = np.sum(log_likelihood) / m
         return loss
 
@@ -90,14 +90,15 @@ class NeuralNet:
     def __get_accuracy(self, predictions, Y):
         return np.sum(predictions == Y) / Y.size
 
-    def __gradient_descent(self, X, Y, lr, epochs):
-        W = self.__W
-        B = self.__B
+    def __gradient_descent(self, X, Y, lr, epochs, log_interval=10):
+        W = [w.copy() for w in self.__W]
+        B = [b.copy() for b in self.__B]
+
         for i in range(epochs + 1):
             Zs, As, output = self.__forward_pass(X, W, B)
             dW, dB = self.__back_prop(Zs, As, output, W, X, Y)
             W, B = self.__update_params(W, B,dW, dB, lr)
-            if i % 10 == 0:
+            if i % log_interval == 0:
                 loss = self.__compute_loss(output, Y)
                 predictions = self.__get_predictions(output)
                 acc = self.__get_accuracy(predictions, Y)
@@ -106,7 +107,27 @@ class NeuralNet:
 
         self.__W = W
         self.__B = B
-    
+
+    def __stochastic_gradient_descent(self, X, Y, lr, epochs=1, log_interval=None):
+        W = [w.copy() for w in self.__W]
+        B = [b.copy() for b in self.__B]
+        log_interval = log_interval or (len(X) // 50)
+        for epoch in range(epochs):
+            indices = np.random.permutation(len(X))
+            for i, idx in enumerate(indices):
+                X_sample = X[idx].reshape(1,-1)
+                Y_sample = np.array([Y[idx]])
+                Zs, As, output = self.__forward_pass(X_sample, W, B)
+                dW, dB = self.__back_prop(Zs, As, output, W, X_sample, Y_sample)
+                W, B = self.__update_params(W, B, dW, dB, lr)
+                if i % log_interval == 0:
+                    loss = self.__compute_loss(output, Y_sample)
+                    print(f"Epoch {epoch}, Iteration {i}, Loss: {loss}")
+                    self.__losses.append(loss)
+        self.__W = W
+        self.__B = B
+
+
     def predict(self, X):
         _, _, output = self.__forward_pass(X, self.__W, self.__B)
         predictions = self.__get_predictions(output)
@@ -128,8 +149,14 @@ class NeuralNet:
     def avalible_training_methods(self):
         print(f"Avalible Methods: {self.__traing_methods}")
 
-    def train(self, X, Y, lr, epochs, traing_method="gradient_descent"):
-        if traing_method == "gradient_descent":
-            self.__gradient_descent(X, Y, lr, epochs)
+    def train(self, X, Y, lr, epochs, traing_method="gd", log_interval=None):
+        if traing_method == "gd":
+            if log_interval is None:
+                log_interval = 10
+            self.__gradient_descent(X=X, Y=Y, lr=lr, epochs=epochs, log_interval=log_interval)
+        elif traing_method == "sgd":
+            if log_interval is None:
+                log_interval = 100
+            self.__stochastic_gradient_descent(X=X, Y=Y, lr=lr, epochs=epochs, log_interval=log_interval)
         else:
             print(f"Avalible Methods: {self.__traing_methods}")
