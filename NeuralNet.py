@@ -1,12 +1,13 @@
 import numpy as np
 from enum import Enum
+from LRScheduler import LRScheduler
 
-class __TrainingMethod(Enum):
+class _TrainingMethod(Enum):
     GD = "gd"
     SGD = "sgd"
     BGD = "bgd"
 
-class __Optimizer(Enum):
+class _Optimizer(Enum):
     SGD = "sgd"
     ADAM = "adam"
     MOMENTUM = "momentum"
@@ -16,10 +17,14 @@ class __Optimizer(Enum):
 class NeuralNet:
     def __init__(self, layers, init_method="he", training_method=None):
         self.__layers = layers
-        self.__available_training_methods = [method.value for method in __TrainingMethod]
-        self.__current_training_method = __TrainingMethod.GD
-        self.__available_optimizers = [opt.value for opt in __Optimizer]
-        self.__current_optimizer = __Optimizer.SGD
+        self.__available_training_methods = [method.value for method in _TrainingMethod]
+        self.__current_training_method = _TrainingMethod.GD
+        self.__available_optimizers = [opt.value for opt in _Optimizer]
+        self.__current_optimizer = _Optimizer.SGD
+
+        # Initialize learning rate scheduler
+        self.lr_scheduler = LRScheduler(base_lr=0.001)
+
         if init_method == "he":
             self.__W = [np.random.randn(layers[i], layers[i + 1]) * np.sqrt(2 / layers[i]) for i in range(len(layers) - 1)]
             self.__B = [np.zeros((1, layers[i + 1])) for i in range(len(layers) - 1)]
@@ -110,17 +115,17 @@ class NeuralNet:
         loss = np.sum(log_likelihood) / m
         return loss
 
-    def __update_params(self, W, B, dW, dB, alpha):
-        if self.__current_optimizer == __Optimizer.SGD:
+    def __update_params(self, W, B, dW, dB, alpha, X=None, Y=None):
+        if self.__current_optimizer == _Optimizer.SGD:
             return self.__sgd_update(W, B, dW, dB, alpha)
-        elif self.__current_optimizer == __Optimizer.ADAM:
+        elif self.__current_optimizer == _Optimizer.ADAM:
             return self.__adam_update(W, B, dW, dB, alpha)
-        elif self.__current_optimizer == __Optimizer.MOMENTUM:
+        elif self.__current_optimizer == _Optimizer.MOMENTUM:
             return self.__momentum_update(W, B, dW, dB, alpha)
-        elif self.__current_optimizer == __Optimizer.RMSPROP:
+        elif self.__current_optimizer == _Optimizer.RMSPROP:
             return self.__RMSprop_update(W, B, dW, dB, alpha)
-        elif self.__current_optimizer == __Optimizer.NESTEROV:
-            return self.__nesterov_update(W, B, dW, dB, alpha)
+        elif self.__current_optimizer == _Optimizer.NESTEROV:
+            return self.__nesterov_update(W, B, dW, dB, alpha, X, Y)
         else:
             raise ValueError("Unsupported optimizer")
     
@@ -169,22 +174,23 @@ class NeuralNet:
 
         return W, B
     
-    def __nesterov_update(self, W, B, dW, dB, lr, beta=0.9):
-        for i in range(len(W)):
-            # Lookahead step
-            V_prev_dw = self.__Mdw[i].copy()
-            V_prev_db = self.__Mdb[i].copy()
+    def __nesterov_update(self, W, B, dW, dB, lr, X, Y, beta=0.9):
+        W_lookahead = [W[i] - beta * self.__Mdw[i] for i in range(len(W))]
+        B_lookahead = [B[i] - beta * self.__Mdb[i] for i in range(len(B))]
 
+        Zs, As, output = self.__forward_pass(X, W_lookahead, B_lookahead)
+        dW_lookahead, dB_lookahead = self.__back_prop(Zs, As, output, W_lookahead, X, Y)
+
+        for i in range(len(W)):
             # Update velocity
-            self.__Mdw[i] = beta * self.__Mdw[i] + dW[i]
-            self.__Mdb[i] = beta * self.__Mdb[i] + dB[i]
+            self.__Mdw[i] = beta * self.__Mdw[i] + dW_lookahead[i]
+            self.__Mdb[i] = beta * self.__Mdb[i] + dB_lookahead[i]
 
             # Update parameters
-            W[i] -= lr * (dW[i] + beta * V_prev_dw)
-            B[i] -= lr * (dB[i] + beta * V_prev_db)
+            W[i] -= lr * self.__Mdw[i]
+            B[i] -= lr * self.__Mdb[i]
 
         return W, B
-    
 
     def __RMSprop_update(self, W, B, dW, dB, lr, beta=0.9, eps=1e-8):
         for i in range(len(W)):
@@ -196,21 +202,23 @@ class NeuralNet:
             B[i] -= lr * dB[i] / (np.sqrt(self.__Rdb[i]) + eps)
 
         return W, B
-    
+
     def __get_predictions(self, output):
         return np.argmax(output, axis=1)
 
     def __get_accuracy(self, predictions, Y):
         return np.sum(predictions == Y) / Y.size
 
-    def __gradient_descent(self, X, Y, lr, epochs, log_interval=10, suppress_output=False):
+    def __gradient_descent(self, X, Y, epochs=1, log_interval=10, suppress_output=False):
         W = [w.copy() for w in self.__W]
         B = [b.copy() for b in self.__B]
 
         for i in range(epochs):
+            self.lr_scheduler.epoch_step()
             Zs, As, output = self.__forward_pass(X, W, B)
             dW, dB = self.__back_prop(Zs, As, output, W, X, Y)
-            W, B = self.__update_params(W, B,dW, dB, lr)
+            lr = self.lr_scheduler.lr
+            W, B = self.__update_params(W, B,dW, dB, lr, X, Y)
             if i % log_interval == 0:
                 loss = self.__compute_loss(output, Y)
                 predictions = self.__get_predictions(output)
@@ -222,20 +230,23 @@ class NeuralNet:
         self.__W = W
         self.__B = B
 
-    def __stochastic_gradient_descent(self, X, Y, lr, epochs=1, log_interval=None, suppress_output=False):
+    def __stochastic_gradient_descent(self, X, Y, epochs=1, log_interval=None, suppress_output=False):
         W = [w.copy() for w in self.__W]
         B = [b.copy() for b in self.__B]
         if log_interval is None:
             log_interval = max(1, len(X) // 20)
 
         for epoch in range(epochs):
+            self.lr_scheduler.epoch_step()
             indices = np.random.permutation(len(X))
             for i, idx in enumerate(indices):
+                self.lr_scheduler.step()
                 X_sample = X[idx].reshape(1,-1)
                 Y_sample = np.array([Y[idx]])
                 Zs, As, output = self.__forward_pass(X_sample, W, B)
                 dW, dB = self.__back_prop(Zs, As, output, W, X_sample, Y_sample)
-                W, B = self.__update_params(W, B, dW, dB, lr)
+                lr = self.lr_scheduler.lr
+                W, B = self.__update_params(W, B, dW, dB, lr, X_sample, Y_sample)
                 if i % log_interval == 0:
                     loss = self.__compute_loss(output, Y_sample)
                     if not suppress_output:
@@ -244,7 +255,7 @@ class NeuralNet:
         self.__W = W
         self.__B = B
 
-    def __batch_gradient_descent(self, X, Y, lr, epochs=1, log_interval=100 , batch_size=32, suppress_output=False):
+    def __batch_gradient_descent(self, X, Y, epochs=1, log_interval=100 , batch_size=32, suppress_output=False):
         if batch_size >= len(X):
             print("Using full-batch training.")
             batch_size = len(X)
@@ -254,15 +265,18 @@ class NeuralNet:
         B = [b.copy() for b in self.__B]
 
         for epoch in range(epochs):
+            self.lr_scheduler.epoch_step()
             indices = np.random.permutation(len(X))
             X = X[indices]
             Y = Y[indices]
             for step in range(0, len(X), batch_size):
+                self.lr_scheduler.step()
                 X_batch = X[step : step + batch_size]
                 Y_batch = Y[step : step + batch_size]
                 Zs, As, output = self.__forward_pass(X_batch, W, B)
                 dW, dB = self.__back_prop(Zs, As, output, W, X_batch, Y_batch)
-                W, B = self.__update_params(W, B, dW, dB, lr)
+                lr = self.lr_scheduler.lr
+                W, B = self.__update_params(W, B, dW, dB, lr, X_batch, Y_batch)
 
                 if (step // batch_size) % log_interval == 0:
                     loss = self.__compute_loss(output, Y_batch)
@@ -295,11 +309,14 @@ class NeuralNet:
     def get_losses(self):
         return self.__losses
 
-    def avalible_training_methods(self):
-        print(f"Avalible Methods: {self.__available_training_methods}")
+    def available_training_methods(self):
+        print(f"Available Methods: {self.__available_training_methods}")
 
-    def avalible_optimizers(self):
-        print(f"Avalible Optimizers: {self.__available_optimizers}")
+    def available_optimizers(self):
+        print(f"Available Optimizers: {self.__available_optimizers}")
+
+    def available_decay_types(self):
+        self.lr_scheduler.available_decay_types()
 
     def reset(self):
         old_method = self.__current_training_method
@@ -314,30 +331,39 @@ class NeuralNet:
     def set_training_method(self, method):
         method = method.strip().lower()
         if method in ["gradient_descent", "gd"]:
-            self.__current_training_method = __TrainingMethod.GD
+            self.__current_training_method = _TrainingMethod.GD
         elif method in ["stochastic_gradient_descent", "sgd"]:
-            self.__current_training_method = __TrainingMethod.SGD
+            self.__current_training_method = _TrainingMethod.SGD
         elif method in ["batch_gradient_descent", "bgd"]:
-            self.__current_training_method = __TrainingMethod.BGD
+            self.__current_training_method = _TrainingMethod.BGD
         else:
             raise ValueError("Unsupported training method")
         
     def set_optimizer(self, optimizer):
         optimizer = optimizer.strip().lower()
         if optimizer == "sgd":
-            self.__current_optimizer = __Optimizer.SGD
+            self.__current_optimizer = _Optimizer.SGD
         elif optimizer == "adam":
-            self.__current_optimizer = __Optimizer.ADAM
+            self.__current_optimizer = _Optimizer.ADAM
         elif optimizer == "momentum":
-            self.__current_optimizer = __Optimizer.MOMENTUM
+            self.__current_optimizer = _Optimizer.MOMENTUM
         elif optimizer == "rmsprop":
-            self.__current_optimizer = __Optimizer.RMSPROP
+            self.__current_optimizer = _Optimizer.RMSPROP
         elif optimizer == "nesterov":
-            self.__current_optimizer = __Optimizer.NESTEROV
+            self.__current_optimizer = _Optimizer.NESTEROV
         else:
             raise ValueError("Unsupported optimizer")
+        
+    def set_decay_type(self, decay_type, **kwargs):
+        self.lr_scheduler.set_decay_type(decay_type, **kwargs)
 
-    def train(self, X, Y, lr, epochs, training_method=None, log_interval=None, batch_size=None, suppress_output=False, reset_all=False, reset_losses=False):
+    def get_base_lr(self):
+        return self.lr_scheduler.get_base_lr()
+    
+    def set_base_lr(self, base_lr):
+        self.lr_scheduler.set_base_lr(base_lr)
+
+    def train(self, X, Y, epochs, lr=None, training_method=None, log_interval=None, batch_size=None, suppress_output=False, reset_all=False, reset_losses=False, lr_override=True):
         if training_method is None:
             if self.__current_training_method is None:
                 raise ValueError("Training method not set. Please set it using set_training_method or provide it in train method.")
@@ -350,20 +376,24 @@ class NeuralNet:
         if reset_losses:
             self.reset_losses()
 
-        if self.__current_training_method == __TrainingMethod.GD:
+        if lr_override:
+            if lr is not None:
+                self.lr_scheduler.set_base_lr(lr)
+
+        if self.__current_training_method == _TrainingMethod.GD:
             if log_interval is None:
                 log_interval = 10
-            self.__gradient_descent(X=X, Y=Y, lr=lr, epochs=epochs, log_interval=log_interval, suppress_output=suppress_output)
-        elif self.__current_training_method == __TrainingMethod.SGD:
+            self.__gradient_descent(X=X, Y=Y, epochs=epochs, log_interval=log_interval, suppress_output=suppress_output)
+        elif self.__current_training_method == _TrainingMethod.SGD:
             if log_interval is None:
                 log_interval = 100
-            self.__stochastic_gradient_descent(X=X, Y=Y, lr=lr, epochs=epochs, log_interval=log_interval, suppress_output=suppress_output)
-        elif self.__current_training_method == __TrainingMethod.BGD:
+            self.__stochastic_gradient_descent(X=X, Y=Y, epochs=epochs, log_interval=log_interval, suppress_output=suppress_output)
+        elif self.__current_training_method == _TrainingMethod.BGD:
             if batch_size is None:
                 batch_size = 32
             if log_interval is None:
                 log_interval = 100
-            self.__batch_gradient_descent(X=X, Y=Y, lr=lr, epochs=epochs, log_interval=log_interval, batch_size=batch_size, suppress_output=suppress_output)
+            self.__batch_gradient_descent(X=X, Y=Y, epochs=epochs, log_interval=log_interval, batch_size=batch_size, suppress_output=suppress_output)
         else:
             print(f"Avalible Methods: {self.__available_training_methods}")
 
