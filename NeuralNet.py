@@ -6,11 +6,20 @@ class __TrainingMethod(Enum):
     SGD = "sgd"
     BGD = "bgd"
 
+class __Optimizer(Enum):
+    SGD = "sgd"
+    ADAM = "adam"
+    MOMENTUM = "momentum"
+    RMSPROP = "rmsprop"
+    NESTEROV = "nesterov"
+
 class NeuralNet:
     def __init__(self, layers, init_method="he", training_method=None):
         self.__layers = layers
         self.__available_training_methods = [method.value for method in __TrainingMethod]
         self.__current_training_method = __TrainingMethod.GD
+        self.__available_optimizers = [opt.value for opt in __Optimizer]
+        self.__current_optimizer = __Optimizer.SGD
         if init_method == "he":
             self.__W = [np.random.randn(layers[i], layers[i + 1]) * np.sqrt(2 / layers[i]) for i in range(len(layers) - 1)]
             self.__B = [np.zeros((1, layers[i + 1])) for i in range(len(layers) - 1)]
@@ -18,6 +27,19 @@ class NeuralNet:
         else:
             raise ValueError("Unsupported initialization method")
         
+        # Adam optimizer parameters (not implemented yet)
+        self.__Vdw = [np.zeros_like(w) for w in self.__W]
+        self.__Sdw = [np.zeros_like(w) for w in self.__W]
+        self.__Vdb = [np.zeros_like(b) for b in self.__B]
+        self.__Sdb = [np.zeros_like(b) for b in self.__B]
+        self.__t = 0  # timestep for Adam
+
+        # RMSprop and Momentum parameters
+        self.__Rdw = [np.zeros_like(w) for w in self.__W]
+        self.__Rdb = [np.zeros_like(b) for b in self.__B]
+        self.__Mdw = [np.zeros_like(w) for w in self.__W]
+        self.__Mdb = [np.zeros_like(b) for b in self.__B]
+
         if training_method is not None:
             self.set_training_method(training_method)
     
@@ -88,11 +110,91 @@ class NeuralNet:
         loss = np.sum(log_likelihood) / m
         return loss
 
-
     def __update_params(self, W, B, dW, dB, alpha):
+        if self.__current_optimizer == __Optimizer.SGD:
+            return self.__sgd_update(W, B, dW, dB, alpha)
+        elif self.__current_optimizer == __Optimizer.ADAM:
+            return self.__adam_update(W, B, dW, dB, alpha)
+        elif self.__current_optimizer == __Optimizer.MOMENTUM:
+            return self.__momentum_update(W, B, dW, dB, alpha)
+        elif self.__current_optimizer == __Optimizer.RMSPROP:
+            return self.__RMSprop_update(W, B, dW, dB, alpha)
+        elif self.__current_optimizer == __Optimizer.NESTEROV:
+            return self.__nesterov_update(W, B, dW, dB, alpha)
+        else:
+            raise ValueError("Unsupported optimizer")
+    
+    def __sgd_update(self, W, B, dW, dB, lr):
         for i in range(len(W)):
-            W[i] -= alpha * dW[i]
-            B[i] -= alpha * dB[i]
+            W[i] -= lr * dW[i]
+            B[i] -= lr * dB[i]
+        return W, B
+
+    def __adam_update(self, W, B, dW, dB, lr, beta1=0.9, beta2=0.999, eps=1e-8):
+        self.__t += 1
+        t = self.__t
+
+        for i in range(len(W)):
+            # Update biased first moment estimate
+            self.__Vdw[i] = beta1 * self.__Vdw[i] + (1 - beta1) * dW[i]
+            self.__Vdb[i] = beta1 * self.__Vdb[i] + (1 - beta1) * dB[i]
+
+            # Update biased second raw moment estimate
+            self.__Sdw[i] = beta2 * self.__Sdw[i] + (1 - beta2) * (dW[i] ** 2)
+            self.__Sdb[i] = beta2 * self.__Sdb[i] + (1 - beta2) * (dB[i] ** 2)
+
+            # Compute bias-corrected first moment estimate
+            Vdw_corrected = self.__Vdw[i] / (1 - beta1 ** t)
+            Vdb_corrected = self.__Vdb[i] / (1 - beta1 ** t)
+
+            # Compute bias-corrected second raw moment estimate
+            Sdw_corrected = self.__Sdw[i] / (1 - beta2 ** t)
+            Sdb_corrected = self.__Sdb[i] / (1 - beta2 ** t)
+
+            # Update parameters
+            W[i] -= lr * Vdw_corrected / (np.sqrt(Sdw_corrected) + eps)
+            B[i] -= lr * Vdb_corrected / (np.sqrt(Sdb_corrected) + eps)
+
+        return W, B
+    
+    def __momentum_update(self, W, B, dW, dB, lr, beta=0.9):
+        for i in range(len(W)):
+            # Update velocity
+            self.__Mdw[i] = beta * self.__Mdw[i] + dW[i]
+            self.__Mdb[i] = beta * self.__Mdb[i] + dB[i]
+
+            # Update parameters
+            W[i] -= lr * self.__Mdw[i]
+            B[i] -= lr * self.__Mdb[i]
+
+        return W, B
+    
+    def __nesterov_update(self, W, B, dW, dB, lr, beta=0.9):
+        for i in range(len(W)):
+            # Lookahead step
+            V_prev_dw = self.__Mdw[i].copy()
+            V_prev_db = self.__Mdb[i].copy()
+
+            # Update velocity
+            self.__Mdw[i] = beta * self.__Mdw[i] + dW[i]
+            self.__Mdb[i] = beta * self.__Mdb[i] + dB[i]
+
+            # Update parameters
+            W[i] -= lr * (dW[i] + beta * V_prev_dw)
+            B[i] -= lr * (dB[i] + beta * V_prev_db)
+
+        return W, B
+    
+
+    def __RMSprop_update(self, W, B, dW, dB, lr, beta=0.9, eps=1e-8):
+        for i in range(len(W)):
+            # Update squared gradients
+            self.__Rdw[i] = beta * self.__Rdw[i] + (1 - beta) * (dW[i] ** 2)
+            self.__Rdb[i] = beta * self.__Rdb[i] + (1 - beta) * (dB[i] ** 2)
+            # Update parameters
+            W[i] -= lr * dW[i] / (np.sqrt(self.__Rdw[i]) + eps)
+            B[i] -= lr * dB[i] / (np.sqrt(self.__Rdb[i]) + eps)
+
         return W, B
     
     def __get_predictions(self, output):
@@ -196,10 +298,15 @@ class NeuralNet:
     def avalible_training_methods(self):
         print(f"Avalible Methods: {self.__available_training_methods}")
 
+    def avalible_optimizers(self):
+        print(f"Avalible Optimizers: {self.__available_optimizers}")
+
     def reset(self):
         old_method = self.__current_training_method
+        old_optimizer = self.__current_optimizer
         self.__init__(layers=self.__layers)
         self.__current_training_method = old_method
+        self.__current_optimizer = old_optimizer
     
     def reset_losses(self):
         self.__losses = []
@@ -214,6 +321,21 @@ class NeuralNet:
             self.__current_training_method = __TrainingMethod.BGD
         else:
             raise ValueError("Unsupported training method")
+        
+    def set_optimizer(self, optimizer):
+        optimizer = optimizer.strip().lower()
+        if optimizer == "sgd":
+            self.__current_optimizer = __Optimizer.SGD
+        elif optimizer == "adam":
+            self.__current_optimizer = __Optimizer.ADAM
+        elif optimizer == "momentum":
+            self.__current_optimizer = __Optimizer.MOMENTUM
+        elif optimizer == "rmsprop":
+            self.__current_optimizer = __Optimizer.RMSPROP
+        elif optimizer == "nesterov":
+            self.__current_optimizer = __Optimizer.NESTEROV
+        else:
+            raise ValueError("Unsupported optimizer")
 
     def train(self, X, Y, lr, epochs, training_method=None, log_interval=None, batch_size=None, suppress_output=False, reset_all=False, reset_losses=False):
         if training_method is None:
