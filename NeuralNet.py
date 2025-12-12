@@ -23,6 +23,9 @@ class NeuralNet:
     
     def __ReLU(self, x):
         return np.maximum(0, x)
+    
+    def __ReLU_derivative(self, x):
+        return (x > 0).astype(float)
 
     def __softmax(self, x):
         exp_x = np.exp(x - np.max(x, axis=1, keepdims=True))  # stability trick
@@ -70,7 +73,7 @@ class NeuralNet:
         # Backpropagate through hidden layers
         for i in reversed(range(L - 1)):
             dA = np.dot(dZ, W[i + 1].T)
-            dZ = dA * (Zs[i] > 0)  # __ReLU derivative
+            dZ = dA * self.__ReLU_derivative(Zs[i])  # __ReLU derivative
             dW[i] = np.dot(As[i].T, dZ)
             dB[i] = np.sum(dZ, axis=0, keepdims=True)
 
@@ -120,7 +123,9 @@ class NeuralNet:
     def __stochastic_gradient_descent(self, X, Y, lr, epochs=1, log_interval=None, suppress_output=False):
         W = [w.copy() for w in self.__W]
         B = [b.copy() for b in self.__B]
-        log_interval = log_interval or max(1, (len(X) // 50))
+        if log_interval is None:
+            log_interval = max(1, len(X) // 20)
+
         for epoch in range(epochs):
             indices = np.random.permutation(len(X))
             for i, idx in enumerate(indices):
@@ -139,7 +144,9 @@ class NeuralNet:
 
     def __batch_gradient_descent(self, X, Y, lr, epochs=1, log_interval=100 , batch_size=32, suppress_output=False):
         if batch_size >= len(X):
-            print("Warning: full-batch selected; consider using GD instead.")
+            print("Using full-batch training.")
+            batch_size = len(X)
+
 
         W = [w.copy() for w in self.__W]
         B = [b.copy() for b in self.__B]
