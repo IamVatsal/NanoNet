@@ -14,16 +14,33 @@ class _Optimizer(Enum):
     RMSPROP = "rmsprop"
     NESTEROV = "nesterov"
 
+class _Regularization(Enum):
+    NONE = "none"
+    L1 = "l1"
+    L2 = "l2"
+
+class _GradientClipper(Enum):
+    NONE = "none"
+    NORM = "norm"
+    VALUE = "value"
+
 class NeuralNet:
-    def __init__(self, layers, init_method="he", training_method=None):
+    def __init__(self, layers, init_method="he", training_method=None, optimizer="sgd", regularization=None, reg_lambda=0.0, lr_scheduler=None, base_lr=0.001, gradient_clipper=None, clip_value=1.0):
         self.__layers = layers
         self.__available_training_methods = [method.value for method in _TrainingMethod]
         self.__current_training_method = _TrainingMethod.GD
         self.__available_optimizers = [opt.value for opt in _Optimizer]
         self.__current_optimizer = _Optimizer.SGD
+        self.__available_regularizations = [reg.value for reg in _Regularization]
+        self.__current_regularization = _Regularization.NONE
+        self.__available_gradient_clippers = [clipper.value for clipper in _GradientClipper]
+        self.__current_gradient_clipper = _GradientClipper.NONE
+        
+        # Regularization lambda
+        self.__regularization_lambda = reg_lambda
 
         # Initialize learning rate scheduler
-        self.lr_scheduler = LRScheduler(base_lr=0.001)
+        self.lr_scheduler = LRScheduler(base_lr=base_lr)
 
         if init_method == "he":
             self.__W = [np.random.randn(layers[i], layers[i + 1]) * np.sqrt(2 / layers[i]) for i in range(len(layers) - 1)]
@@ -47,6 +64,14 @@ class NeuralNet:
 
         if training_method is not None:
             self.set_training_method(training_method)
+        if regularization is not None:
+            self.__current_regularization = _Regularization(regularization)
+        if optimizer is not None:
+            self.set_optimizer(optimizer)
+        if lr_scheduler is not None:
+            self.lr_scheduler.set_decay_type(lr_scheduler)
+        if gradient_clipper is not None:
+            self.set_gradient_clipper(gradient_clipper, clip_value)
     
     def __ReLU(self, x):
         return np.maximum(0, x)
@@ -79,10 +104,48 @@ class NeuralNet:
     def __one_hot(self, Y, num_classes):
         one_hot_Y = np.eye(num_classes)[Y.astype(int)]
         return one_hot_Y
+    
+    def __compute_weights(self, A, dz, W):
+        m = A.shape[0]
+        basegrad = np.dot(A, dz) / m
+
+        if self.__current_regularization == _Regularization.NONE:
+            return basegrad
+        elif self.__current_regularization == _Regularization.L2:
+            return basegrad + (self.__regularization_lambda / m) * W
+        elif self.__current_regularization == _Regularization.L1:
+            return basegrad + (self.__regularization_lambda / m) * np.sign(W + 1e-8)
+        
+    def __clip_gradients(self, dW, dB):
+        if self.__current_gradient_clipper == _GradientClipper.NONE:
+            return dW, dB
+        
+        elif self.__current_gradient_clipper == _GradientClipper.VALUE:
+            for i in range(len(dW)):
+                dW[i] = np.clip(dW[i], -self.__gradient_clip_value, self.__gradient_clip_value)
+                dB[i] = np.clip(dB[i], -self.__gradient_clip_value, self.__gradient_clip_value)
+            return dW, dB
+        
+        elif self.__current_gradient_clipper == _GradientClipper.NORM:
+            total_norm = 0.0
+            for i in range(len(dW)):
+                total_norm += np.sum(dW[i] ** 2) 
+                total_norm += np.sum(dB[i] ** 2)
+
+            total_norm = np.sqrt(total_norm)
+
+            if total_norm > self.__gradient_clip_value:
+                scale = self.__gradient_clip_value / (total_norm + 1e-6)
+                for i in range(len(dW)):
+                    dW[i] *= scale
+                    dB[i] *= scale
+            return dW, dB
+
 
     def __back_prop(self, Zs, As, output, W, X, Y):
         # Number of layers (including output layer)
         L = len(W)
+        m = X.shape[0]
 
         # One-hot encode labels
         num_classes = output.shape[1]
@@ -93,15 +156,16 @@ class NeuralNet:
         dB = [None] * L
 
         # Gradient for output layer (__softmax + cross-entropy)
-        dZ = (output - one_hot_Y) / X.shape[0]
-        dW[L - 1] = np.dot(As[-1].T, dZ)
+        dZ = (output - one_hot_Y) / m
+        # Compute gradients for output layer
+        dW[L - 1] = self.__compute_weights(As[-1].T, dZ, W[L - 1])
         dB[L - 1] = np.sum(dZ, axis=0, keepdims=True)
 
         # Backpropagate through hidden layers
         for i in reversed(range(L - 1)):
             dA = np.dot(dZ, W[i + 1].T)
             dZ = dA * self.__ReLU_derivative(Zs[i])  # __ReLU derivative
-            dW[i] = np.dot(As[i].T, dZ)
+            dW[i] = self.__compute_weights(As[i].T, dZ, W[i])
             dB[i] = np.sum(dZ, axis=0, keepdims=True)
 
         return dW, dB
@@ -113,6 +177,12 @@ class NeuralNet:
         prob = np.clip(output, 1e-8, 1 - 1e-8)
         log_likelihood = -np.log(prob[range(m), Y])
         loss = np.sum(log_likelihood) / m
+        if self.__current_regularization == _Regularization.L2:
+            l2_sum = sum([np.sum(np.square(w)) for w in self.__W])
+            loss += (self.__regularization_lambda / (2 * m)) * l2_sum
+        elif self.__current_regularization == _Regularization.L1:
+            l1_sum = sum([np.sum(np.abs(w)) for w in self.__W])
+            loss += (self.__regularization_lambda / m) * l1_sum
         return loss
 
     def __update_params(self, W, B, dW, dB, alpha, X=None, Y=None):
@@ -217,6 +287,7 @@ class NeuralNet:
             self.lr_scheduler.epoch_step()
             Zs, As, output = self.__forward_pass(X, W, B)
             dW, dB = self.__back_prop(Zs, As, output, W, X, Y)
+            dW, dB = self.__clip_gradients(dW, dB)
             lr = self.lr_scheduler.lr
             W, B = self.__update_params(W, B,dW, dB, lr, X, Y)
             if i % log_interval == 0:
@@ -245,6 +316,7 @@ class NeuralNet:
                 Y_sample = np.array([Y[idx]])
                 Zs, As, output = self.__forward_pass(X_sample, W, B)
                 dW, dB = self.__back_prop(Zs, As, output, W, X_sample, Y_sample)
+                dW, dB = self.__clip_gradients(dW, dB)
                 lr = self.lr_scheduler.lr
                 W, B = self.__update_params(W, B, dW, dB, lr, X_sample, Y_sample)
                 if i % log_interval == 0:
@@ -275,6 +347,7 @@ class NeuralNet:
                 Y_batch = Y[step : step + batch_size]
                 Zs, As, output = self.__forward_pass(X_batch, W, B)
                 dW, dB = self.__back_prop(Zs, As, output, W, X_batch, Y_batch)
+                dW, dB = self.__clip_gradients(dW, dB)
                 lr = self.lr_scheduler.lr
                 W, B = self.__update_params(W, B, dW, dB, lr, X_batch, Y_batch)
 
@@ -318,6 +391,12 @@ class NeuralNet:
     def available_decay_types(self):
         self.lr_scheduler.available_decay_types()
 
+    def available_regularizations(self):
+        print(f"Available Regularizations: {self.__available_regularizations}")
+
+    def available_gradient_clippers(self):
+        print(f"Available Gradient Clippers: {self.__available_gradient_clippers}")
+
     def reset(self):
         old_method = self.__current_training_method
         old_optimizer = self.__current_optimizer
@@ -356,6 +435,38 @@ class NeuralNet:
         
     def set_decay_type(self, decay_type, **kwargs):
         self.lr_scheduler.set_decay_type(decay_type, **kwargs)
+
+    def set_regularization(self, regularization, reg_lambda=0.0):
+        regularization = regularization.strip().lower()
+        if regularization == "none":
+            self.__current_regularization = _Regularization.NONE
+        elif regularization == "l1":
+            self.__current_regularization = _Regularization.L1
+        elif regularization == "l2":
+            self.__current_regularization = _Regularization.L2
+        else:
+            raise ValueError("Unsupported regularization type")
+        self.__regularization_lambda = reg_lambda
+
+    def set_gradient_clipper(self, gradient_clipper, clip_value=1.0):
+        gradient_clipper = gradient_clipper.strip().lower()
+
+        if gradient_clipper == "none":
+            self.__current_gradient_clipper = _GradientClipper.NONE
+            self.__gradient_clip_value = None
+            return
+
+        if clip_value is None or clip_value <= 0:
+            raise ValueError("Clip value must be a positive number")
+        
+        elif gradient_clipper == "norm":
+            self.__current_gradient_clipper = _GradientClipper.NORM
+        elif gradient_clipper == "value":
+            self.__current_gradient_clipper = _GradientClipper.VALUE
+        else:
+            raise ValueError("Unsupported gradient clipper type")
+        
+        self.__gradient_clip_value = clip_value
 
     def get_base_lr(self):
         return self.lr_scheduler.get_base_lr()
@@ -398,3 +509,11 @@ class NeuralNet:
             print(f"Avalible Methods: {self.__available_training_methods}")
 
         return list(self.__losses)
+    
+    def plot_losses(self):
+        import matplotlib.pyplot as plt
+        plt.plot(self.__losses)
+        plt.xlabel("Iterations")
+        plt.ylabel("Loss")
+        plt.title("Loss over Iterations")
+        plt.show()
